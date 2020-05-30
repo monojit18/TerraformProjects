@@ -1,3 +1,5 @@
+
+
 # Codify Infrastructure on Azure - terraform
 
 Let us see how to deploy a **Storage** resource on Azure. <br>But before delving into this, let us have a look at the high level view of the terraform components:
@@ -41,7 +43,9 @@ resource "azurerm_resource_group" "rg" {
 }
 ```
 
-*azurerm_resource_group* is the resource Type and *rg* is the name of the resource in terraform context i.e. the name by which terraform internally refers to it. This also brings a degree of object orientation or structured approach while accessing the resource and its properties e.g. *azurerm_resource_group.rg.localtion*
+*azurerm_resource_group* is the resource Type and *rg* is the name of the resource in terraform context i.e. the name by which terraform internally refers to it. This also brings a degree of object orientation or structured approach while accessing the resource and its properties e.g. *azurerm_resource_group.rg.localtion*.
+
+Terraform follows idempotent approach i.e. if the resource does not exist then it will be created or else it will be either updated or ignored, based on the current state and desired state
 
 ### Storage Account
 
@@ -295,4 +299,315 @@ output "kv-subnet-id" {
 - **KeyVault** - https://www.terraform.io/docs/providers/azurerm/r/key_vault.html
 - **KeyVault with Access Policies** - https://www.terraform.io/docs/providers/azurerm/r/key_vault_access_policy.html
 - **KeyVault with Network Rules** - https://www.terraform.io/docs/providers/azurerm/r/key_vault.html#network_acls
+- **Source Code**: https://github.com/monojit18/TerraformProjects.git 
+
+
+
+## WebApp
+
+```
+resource "azurerm_app_service_plan" "appplan" {
+
+    name = "webapp-standard-plan"
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+
+    sku {
+
+        tier = "Standard"
+        size = "S1"
+
+    }
+}
+```
+
+App Service Plan is created first which would hold multiple app services inside it. The cost for the app services are actually tagged with the corresponding plan; Scaling and Performance parameters are also linked with the plan only and shared across all app services  within the same plan!
+
+```
+resource "azurerm_app_service" "appservice" {
+  
+    name = "terraform-app-service"
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+    app_service_plan_id = azurerm_app_service_plan.appplan.id // referring the Plan created earlier!
+
+    site_config {
+
+        dotnet_framework_version = "v4.0"
+
+    }
+}
+```
+
+App service refers to the App Service Plan created in earlier step (*dependency*).<br>***site_config*** - primarily defines the tech stack and vision for the app service. There are many other parameters and you need to refer to the docs (*links below*).
+
+### Storage Account for WebApp
+
+WebApp like many other resources on Azure needs a Storage account to maintain state and other such information. If not specified during creation process in the above scripts - it would create a default one. To avoid this, ***storage_account*** block would help to create a custom storage account..like below -
+
+```
+resource "azurerm_app_service" "appservice" {
+  
+    name = "terraform-app-service"
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+    app_service_plan_id = azurerm_app_service_plan.appplan.id
+
+    site_config {
+
+        dotnet_framework_version = "v4.0"
+
+    }
+
+    storage_account { // custom storage account
+
+        name = "PrimaryKey"
+        access_key = "<access_key>"
+        type = "AzureBlob"
+        account_name = "terrwkshpstg"
+        share_name = "webappcntr"
+
+    }
+}
+```
+
+One catch with this approach is that the Access Key of the storage account is exposed - which is risky. How do we solve that? Easiest way to achieve this is store that in a KeyVault (*like the one we just created in previous section!*). But how to refer to the KeyVault and also the secret at runtime without exposing it? Terraform has a nice config type called *data* that helps in here!
+
+Let us quickly delve into this -
+
+```
+data "azurerm_key_vault" "existing" {
+
+    name = "terraform-workshop-kv"
+    resource_group_name = azurerm_resource_group.rg.name
+}
+
+data "azurerm_key_vault_secret" "existing" {
+
+    name = "stgpkey"
+    key_vault_id = data.azurerm_key_vault.existing.id // Referring the KeyVault retrieved
+}
+```
+
+*azurerm_key_vault* is the type that we are referring with data; the name *existing* is just for convenience; to make it more meaningful, that refers to an existing KeyVault instance!
+
+*azurerm_key_vault_secret* is the secret type from KeyVault which would return the secret value of the said key (i.e. *stgpkey* in this case).
+
+```
+resource "azurerm_app_service" "appservice" {
+  
+    name = "terraform-app-service"
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+    app_service_plan_id = azurerm_app_service_plan.appplan.id
+
+    site_config {
+
+        dotnet_framework_version = "v4.0"
+
+    }
+
+    storage_account {
+
+        name = "PrimaryKey"
+        access_key = data.azurerm_key_vault_secret.existing.key_vault_id // Secret Value
+        type = "AzureBlob"
+        account_name = "terrwkshpstg"
+        share_name = "webappcntr"
+
+    }
+}
+```
+
+### Slots
+
+How to define slots for the app and specify while creating the App service? Simple in terraform...just specify a Slot block and define the config for the slot -
+
+```
+variable "env" {
+  
+    type = list(string)
+    default = ["DEV", "QA"] // Array of environments
+    
+}
+```
+
+
+
+#### 	*DEV - Slot*
+
+```
+resource "azurerm_app_service_slot" "devslot" {
+  
+    name = join("", [azurerm_app_service.appservice.name, "-", var.env[0], "-slot"]) // DEV
+    app_service_name = azurerm_app_service.appservice.name
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+    app_service_plan_id = azurerm_app_service_plan.appplan.id
+
+    site_config {
+
+        dotnet_framework_version = "v4.0"
+
+    }
+}
+```
+
+#### 	*QA - Slot*
+
+```
+	resource "azurerm_app_service_slot" "qaslot" {
+  
+    name = join("", [azurerm_app_service.appservice.name, "-", var.env[1], "-slot"]) // QA
+    app_service_name = azurerm_app_service.appservice.name
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+    app_service_plan_id = azurerm_app_service_plan.appplan.id
+
+    site_config {
+
+        dotnet_framework_version = "v4.0"
+
+    }
+}
+```
+
+
+
+#### Refs:
+
+- ***WebApp*** - https://www.terraform.io/docs/providers/azurerm/r/app_service.html
+- **WebApp with Slots** - https://www.terraform.io/docs/providers/azurerm/r/app_service_slot.html
+- **Source Code**: https://github.com/monojit18/TerraformProjects.git 
+
+
+
+### Virtual Network
+
+```
+provider "azurerm" {
+
+    version = "=2.11.0"
+    features {}
+    subscription_id = "<subscription_id>"
+    tenant_id = "<tenant_id>"
+
+}
+```
+
+This is standard way of specifying Azure Provider. So that terraform can download necessary plugins and dependencies.
+
+How to create the resource group on Azure? As previously described -
+
+```
+resource "azurerm_resource_group" "rg" {
+
+    name = "terraform-workshop-rg"
+    location = "eastus"
+    tags = {
+
+        Primary_Owner = "monojit.datta@outlook.com"
+        Purpose = "workshop"
+
+    }
+}
+```
+
+Creating the Virtual Network (VNET) on Azure - nothing special
+
+```
+resource "azurerm_virtual_network" "vnet" {
+
+    name = "terraform-workshop-vnet"
+    location = azurerm_resource_group.rg.location
+    resource_group_name = azurerm_resource_group.rg.name
+    address_space = ["173.0.0.0/16"]    
+  
+}
+```
+
+Creating subnet to hold/integrate with various resources - e.g. following is for Storage -
+
+```
+resource "azurerm_subnet" "storage-subnet" {
+
+    name = "terraform-workshop-storage-subnet"    
+    resource_group_name = azurerm_resource_group.rg.name
+    virtual_network_name = azurerm_virtual_network.vnet.name
+    address_prefixes = ["173.0.0.0/24"]
+    service_endpoints = ["Microsoft.Storage"]
+  
+}
+```
+
+Similarly ones for KeyVault and ACR respectively -
+
+```
+resource "azurerm_subnet" "kv-subnet" {
+
+    name = "terraform-workshop-kv-subnet"    
+    resource_group_name = azurerm_resource_group.rg.name
+    virtual_network_name = azurerm_virtual_network.vnet.name
+    address_prefixes = ["173.0.2.0/24"]
+    service_endpoints = ["Microsoft.KeyVault"]
+  
+}
+
+```
+
+```
+resource "azurerm_subnet" "acr-subnet" {
+
+    name = "terraform-workshop-acr-subnet"    
+    resource_group_name = azurerm_resource_group.rg.name
+    virtual_network_name = azurerm_virtual_network.vnet.name
+    address_prefixes = ["173.0.1.0/24"]
+    service_endpoints = ["Microsoft.ContainerRegistry"]
+  
+}
+```
+
+#### Role Assignments
+
+How to assign network specific roles to VNET - e.g. below is how you can assign *Network Contributor* role -
+
+```
+resource "azurerm_role_assignment" "nwroles" {
+  scope                = azurerm_virtual_network.vnet.id
+  role_definition_name = "Network Contributor"
+  principal_id         = "<principal_id>"
+  
+}
+```
+
+***principal_id*** - is obtained by running - *az role assignment list <>* 
+
+#### Module Output
+
+What if other modules need the Subnet Ids or some other info for further use? Terraform can expose such desired values as *output*; e.g. Subnet Ids for Storage, ACR and KeyVault all are exposed as below -
+
+```
+output "storage-subnet-id" {    
+  value = azurerm_subnet.storage-subnet.id
+}
+
+output "acr-subnet-ip" {    
+  value = azurerm_subnet.acr-subnet.address_prefixes[0]
+}
+
+output "acr-subnet-id" {    
+  value = azurerm_subnet.acr-subnet.id
+}
+
+output "kv-subnet-id" {    
+  value = azurerm_subnet.kv-subnet.id
+}
+```
+
+For ACR, as can be seen, it exposes both ACR subnet address prefix as fellas Subnet Id
+
+#### Refs:
+
+- ***Virtual Network*** - https://www.terraform.io/docs/providers/azurerm/r/virtual_network.html
+- **Subnet** - https://www.terraform.io/docs/providers/azurerm/r/subnet.html
 - **Source Code**: https://github.com/monojit18/TerraformProjects.git 
